@@ -15,8 +15,12 @@ describe('AppController', () => {
   });
 
   describe('root', () => {
-    it('should return "Hello World!"', () => {
-      expect(appController.getHello()).toBe('Hello World!');
+    it('should return the API status', () => {
+      expect(appController.getStatus()).toEqual({
+        name: 'AI Chatbot API',
+        status: 'running',
+        chatEndpoint: 'POST /chat',
+      });
     });
   });
 });
