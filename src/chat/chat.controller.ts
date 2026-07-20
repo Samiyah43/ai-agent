@@ -8,7 +8,6 @@ export class ChatController {
 
   @Post()
   async createReply(@Body() body: ChatRequestDto) {
-    const reply = await this.chatService.createReply(body.message);
-    return { reply };
+    return this.chatService.createReply(body.message, body.conversationId);
   }
 }

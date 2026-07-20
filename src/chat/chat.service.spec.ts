@@ -36,9 +36,10 @@ describe('ChatService', () => {
     const configService = createConfigService({ OPENAI_API_KEY: 'test-key' });
     const service = new ChatService(configService);
 
-    const reply = await service.createReply('Hi');
+    const result = await service.createReply('Hi');
 
-    expect(reply).toBe('Hello there!');
+    expect(result.reply).toBe('Hello there!');
+    expect(result.conversationId).toEqual(expect.any(String));
     expect(mockCreate).toHaveBeenCalledWith(
       expect.objectContaining({
         messages: expect.arrayContaining([{ role: 'user', content: 'Hi' }]),
@@ -51,9 +52,70 @@ describe('ChatService', () => {
     const configService = createConfigService({ OPENAI_API_KEY: 'test-key' });
     const service = new ChatService(configService);
 
-    const reply = await service.createReply('Hi');
+    const result = await service.createReply('Hi');
 
-    expect(reply).toBe('Sorry, I could not generate a reply. Please try again.');
+    expect(result.reply).toBe('Sorry, I could not generate a reply. Please try again.');
+  });
+
+  it('remembers earlier turns in the same conversation', async () => {
+    mockCreate
+      .mockResolvedValueOnce({ choices: [{ message: { content: 'Nice to meet you, Ali!' } }] })
+      .mockResolvedValueOnce({ choices: [{ message: { content: 'Your name is Ali.' } }] });
+
+    const configService = createConfigService({ OPENAI_API_KEY: 'test-key' });
+    const service = new ChatService(configService);
+
+    const first = await service.createReply('My name is Ali');
+    const second = await service.createReply('What is my name?', first.conversationId);
+
+    expect(second.reply).toBe('Your name is Ali.');
+    expect(mockCreate).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        messages: expect.arrayContaining([
+          { role: 'user', content: 'My name is Ali' },
+          { role: 'assistant', content: 'Nice to meet you, Ali!' },
+          { role: 'user', content: 'What is my name?' },
+        ]),
+      }),
+    );
+  });
+
+  it('calls the calculator tool and returns the follow-up reply', async () => {
+    mockCreate
+      .mockResolvedValueOnce({
+        choices: [
+          {
+            message: {
+              content: null,
+              tool_calls: [
+                {
+                  id: 'call_1',
+                  type: 'function',
+                  function: { name: 'calculator', arguments: '{"expression":"2 + 2"}' },
+                },
+              ],
+            },
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        choices: [{ message: { content: 'The answer is 4.' } }],
+      });
+
+    const configService = createConfigService({ OPENAI_API_KEY: 'test-key' });
+    const service = new ChatService(configService);
+
+    const result = await service.createReply('What is 2 + 2?');
+
+    expect(result.reply).toBe('The answer is 4.');
+    expect(mockCreate).toHaveBeenCalledTimes(2);
+    expect(mockCreate).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        messages: expect.arrayContaining([
+          expect.objectContaining({ role: 'tool', tool_call_id: 'call_1', content: '4' }),
+        ]),
+      }),
+    );
   });
 
   it('throws BadGatewayException when the OpenAI request fails', async () => {
