@@ -4,6 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import OpenAI from 'openai';
 import { PrismaService } from '../prisma/prisma.service';
 import { calculatorToolDefinition, runCalculator } from './tools/calculator.tool';
+import { knowledgeBaseToolDefinition, runKnowledgeBase } from './tools/knowledge-base.tool';
 import { runWeather, weatherToolDefinition } from './tools/weather.tool';
 
 const CHATBOT_INSTRUCTIONS = [
@@ -11,9 +12,16 @@ const CHATBOT_INSTRUCTIONS = [
   'Reply clearly and honestly.',
   'Use short sections or steps when they make an explanation easier to follow.',
   'If the user writes in Roman Urdu, reply in Roman Urdu unless they ask for another language.',
+  'When you answer using results from the search_knowledge_base tool, only state facts that are explicitly present in those results.',
+  'Do not add extra steps, numbers, features, or claims that are not in the retrieved text, even if they sound plausible.',
+  'If the retrieved text does not fully answer the question, say what it does cover and clearly note that the rest is not in the knowledge base.',
 ].join(' ');
 
-const TOOLS: OpenAI.Chat.ChatCompletionTool[] = [calculatorToolDefinition, weatherToolDefinition];
+const TOOLS: OpenAI.Chat.ChatCompletionTool[] = [
+  calculatorToolDefinition,
+  weatherToolDefinition,
+  knowledgeBaseToolDefinition,
+];
 
 // Keeps the system message plus this many of the most recent messages, so a
 // long-running conversation doesn't grow the prompt (and cost) forever.
@@ -145,7 +153,11 @@ export class ChatService {
     }
 
     try {
-      const args = JSON.parse(toolCall.function.arguments) as { expression?: string; location?: string };
+      const args = JSON.parse(toolCall.function.arguments) as {
+        expression?: string;
+        location?: string;
+        query?: string;
+      };
 
       switch (toolCall.function.name) {
         case 'calculator':
@@ -158,6 +170,11 @@ export class ChatService {
             return 'Error: no location was provided.';
           }
           return await runWeather(args.location);
+        case 'search_knowledge_base':
+          if (!args.query) {
+            return 'Error: no query was provided.';
+          }
+          return await runKnowledgeBase(args.query, this.prisma);
         default:
           return `Error: unknown tool "${toolCall.function.name}".`;
       }

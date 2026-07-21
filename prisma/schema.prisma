@@ -22,3 +22,28 @@ model Message {
 
   @@index([conversationId])
 }
+
+// A source document that was ingested into the knowledge base (e.g. a policy
+// or FAQ). Kept in full so it can be re-chunked later if the chunking
+// strategy changes.
+model Document {
+  id        Int      @id @default(autoincrement())
+  title     String
+  content   String
+  createdAt DateTime @default(now())
+  chunks    Chunk[]
+}
+
+// A chunk of a Document, plus its embedding vector (stored as a JSON string
+// since SQLite has no native vector type). Similarity is computed in
+// JavaScript at query time.
+model Chunk {
+  id         Int      @id @default(autoincrement())
+  documentId Int
+  content    String
+  embedding  String
+  createdAt  DateTime @default(now())
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([documentId])
+}
