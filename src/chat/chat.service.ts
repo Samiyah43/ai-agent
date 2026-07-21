@@ -4,6 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import OpenAI from 'openai';
 import { PrismaService } from '../prisma/prisma.service';
 import { calculatorToolDefinition, runCalculator } from './tools/calculator.tool';
+import { runWeather, weatherToolDefinition } from './tools/weather.tool';
 
 const CHATBOT_INSTRUCTIONS = [
   'You are a helpful, beginner-friendly AI chatbot.',
@@ -12,7 +13,7 @@ const CHATBOT_INSTRUCTIONS = [
   'If the user writes in Roman Urdu, reply in Roman Urdu unless they ask for another language.',
 ].join(' ');
 
-const TOOLS: OpenAI.Chat.ChatCompletionTool[] = [calculatorToolDefinition];
+const TOOLS: OpenAI.Chat.ChatCompletionTool[] = [calculatorToolDefinition, weatherToolDefinition];
 
 // Keeps the system message plus this many of the most recent messages, so a
 // long-running conversation doesn't grow the prompt (and cost) forever.
@@ -73,7 +74,7 @@ export class ChatService {
           const toolMessage: OpenAI.Chat.ChatCompletionMessageParam = {
             role: 'tool',
             tool_call_id: toolCall.id,
-            content: this.runTool(toolCall),
+            content: await this.runTool(toolCall),
           };
           history.push(toolMessage);
           await this.persist(id, toolMessage);
@@ -138,20 +139,28 @@ export class ChatService {
     });
   }
 
-  private runTool(toolCall: OpenAI.Chat.ChatCompletionMessageToolCall): string {
+  private async runTool(toolCall: OpenAI.Chat.ChatCompletionMessageToolCall): Promise<string> {
     if (toolCall.type !== 'function') {
       return `Error: unsupported tool call type "${toolCall.type}".`;
     }
-    if (toolCall.function.name !== 'calculator') {
-      return `Error: unknown tool "${toolCall.function.name}".`;
-    }
 
     try {
-      const args = JSON.parse(toolCall.function.arguments) as { expression?: string };
-      if (!args.expression) {
-        return 'Error: no expression was provided.';
+      const args = JSON.parse(toolCall.function.arguments) as { expression?: string; location?: string };
+
+      switch (toolCall.function.name) {
+        case 'calculator':
+          if (!args.expression) {
+            return 'Error: no expression was provided.';
+          }
+          return runCalculator(args.expression);
+        case 'get_weather':
+          if (!args.location) {
+            return 'Error: no location was provided.';
+          }
+          return await runWeather(args.location);
+        default:
+          return `Error: unknown tool "${toolCall.function.name}".`;
       }
-      return runCalculator(args.expression);
     } catch {
       return 'Error: could not parse the tool arguments.';
     }
