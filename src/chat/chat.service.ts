@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { BadGatewayException, Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import OpenAI from 'openai';
+import { PrismaService } from '../prisma/prisma.service';
 import { calculatorToolDefinition, runCalculator } from './tools/calculator.tool';
 
 const CHATBOT_INSTRUCTIONS = [
@@ -25,9 +26,11 @@ export interface ChatReply {
 @Injectable()
 export class ChatService {
   private readonly client: OpenAI | null;
-  private readonly conversations = new Map<string, OpenAI.Chat.ChatCompletionMessageParam[]>();
 
-  constructor(private readonly configService: ConfigService) {
+  constructor(
+    private readonly configService: ConfigService,
+    private readonly prisma: PrismaService,
+  ) {
     const apiKey = this.configService.get<string>('OPENAI_API_KEY');
     const baseURL = this.configService.get<string>('OPENAI_BASE_URL');
     this.client = apiKey ? new OpenAI({ apiKey, baseURL }) : null;
@@ -41,9 +44,11 @@ export class ChatService {
     }
 
     const id = conversationId ?? randomUUID();
-    const history =
-      this.conversations.get(id) ?? ([{ role: 'system', content: CHATBOT_INSTRUCTIONS }] as OpenAI.Chat.ChatCompletionMessageParam[]);
-    history.push({ role: 'user', content: message });
+    const history = await this.loadHistory(id);
+
+    const userMessage: OpenAI.Chat.ChatCompletionMessageParam = { role: 'user', content: message };
+    history.push(userMessage);
+    await this.persist(id, userMessage);
 
     const model = this.configService.get<string>('OPENAI_MODEL') ?? 'gpt-5-mini';
 
@@ -62,12 +67,16 @@ export class ChatService {
         reply = responseMessage?.content || 'Sorry, I could not generate a reply. Please try again.';
       } else {
         history.push(responseMessage);
+        await this.persist(id, responseMessage);
+
         for (const toolCall of toolCalls) {
-          history.push({
+          const toolMessage: OpenAI.Chat.ChatCompletionMessageParam = {
             role: 'tool',
             tool_call_id: toolCall.id,
             content: this.runTool(toolCall),
-          });
+          };
+          history.push(toolMessage);
+          await this.persist(id, toolMessage);
         }
 
         const followUp = await this.client.chat.completions.create({ model, messages: history });
@@ -76,9 +85,7 @@ export class ChatService {
           'Sorry, I could not generate a reply. Please try again.';
       }
 
-      history.push({ role: 'assistant', content: reply });
-      this.trimHistory(history);
-      this.conversations.set(id, history);
+      await this.persist(id, { role: 'assistant', content: reply });
 
       return { reply, conversationId: id };
     } catch (error) {
@@ -89,13 +96,46 @@ export class ChatService {
     }
   }
 
-  private trimHistory(history: OpenAI.Chat.ChatCompletionMessageParam[]): void {
-    if (history.length <= MAX_HISTORY_MESSAGES) {
-      return;
+  // Loads a conversation's messages from the database, oldest first. A brand-new
+  // conversationId has no rows yet, so we seed it with the system prompt.
+  private async loadHistory(conversationId: string): Promise<OpenAI.Chat.ChatCompletionMessageParam[]> {
+    const rows = await this.prisma.message.findMany({
+      where: { conversationId },
+      orderBy: { id: 'asc' },
+    });
+
+    if (!rows.length) {
+      const systemMessage: OpenAI.Chat.ChatCompletionMessageParam = {
+        role: 'system',
+        content: CHATBOT_INSTRUCTIONS,
+      };
+      await this.persist(conversationId, systemMessage);
+      return [systemMessage];
     }
-    const systemMessage = history[0];
-    const recent = history.slice(-(MAX_HISTORY_MESSAGES - 1));
-    history.splice(0, history.length, systemMessage, ...recent);
+
+    const history = rows.map((row) => JSON.parse(row.data) as OpenAI.Chat.ChatCompletionMessageParam);
+    return this.trimForModel(history);
+  }
+
+  // Every message ever sent is kept in the database, but only the system message
+  // plus the most recent messages are sent to the model, so cost/context stays bounded.
+  private trimForModel(
+    history: OpenAI.Chat.ChatCompletionMessageParam[],
+  ): OpenAI.Chat.ChatCompletionMessageParam[] {
+    if (history.length <= MAX_HISTORY_MESSAGES) {
+      return history;
+    }
+    const [systemMessage] = history;
+    return [systemMessage, ...history.slice(-(MAX_HISTORY_MESSAGES - 1))];
+  }
+
+  private async persist(
+    conversationId: string,
+    message: OpenAI.Chat.ChatCompletionMessageParam,
+  ): Promise<void> {
+    await this.prisma.message.create({
+      data: { conversationId, role: message.role, data: JSON.stringify(message) },
+    });
   }
 
   private runTool(toolCall: OpenAI.Chat.ChatCompletionMessageToolCall): string {
