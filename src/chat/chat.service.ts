@@ -12,6 +12,7 @@ const CHATBOT_INSTRUCTIONS = [
   'Reply clearly and honestly.',
   'Use short sections or steps when they make an explanation easier to follow.',
   'If the user writes in Roman Urdu, reply in Roman Urdu unless they ask for another language.',
+  'For any question that could plausibly be about a company policy, procedure, or other topic that might be documented (e.g. leave, remote work, security, benefits, "the document", "this file"), you must call search_knowledge_base first. Never rely on your own general/textbook knowledge for these topics, even if you think you already know a typical answer — the user only wants what is actually in their own uploaded documents. Only ask the user to clarify if the tool returns no relevant results.',
   'When you answer using results from the search_knowledge_base tool, only state facts that are explicitly present in those results.',
   'Do not add extra steps, numbers, features, or claims that are not in the retrieved text, even if they sound plausible.',
   'If the retrieved text does not fully answer the question, say what it does cover and clearly note that the rest is not in the knowledge base.',
@@ -158,26 +159,27 @@ export class ChatService {
         location?: string;
         query?: string;
       };
+      console.log(`[tool call] ${toolCall.function.name}(${JSON.stringify(args)})`);
 
+      let result: string;
       switch (toolCall.function.name) {
         case 'calculator':
-          if (!args.expression) {
-            return 'Error: no expression was provided.';
-          }
-          return runCalculator(args.expression);
+          result = args.expression ? runCalculator(args.expression) : 'Error: no expression was provided.';
+          break;
         case 'get_weather':
-          if (!args.location) {
-            return 'Error: no location was provided.';
-          }
-          return await runWeather(args.location);
+          result = args.location ? await runWeather(args.location) : 'Error: no location was provided.';
+          break;
         case 'search_knowledge_base':
-          if (!args.query) {
-            return 'Error: no query was provided.';
-          }
-          return await runKnowledgeBase(args.query, this.prisma);
+          result = args.query
+            ? await runKnowledgeBase(args.query, this.prisma)
+            : 'Error: no query was provided.';
+          break;
         default:
-          return `Error: unknown tool "${toolCall.function.name}".`;
+          result = `Error: unknown tool "${toolCall.function.name}".`;
       }
+
+      console.log(`[tool result] ${toolCall.function.name} -> ${result.slice(0, 200)}`);
+      return result;
     } catch {
       return 'Error: could not parse the tool arguments.';
     }

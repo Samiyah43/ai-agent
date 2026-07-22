@@ -23,8 +23,10 @@ export const knowledgeBaseToolDefinition: OpenAI.Chat.ChatCompletionTool = {
 
 const TOP_MATCHES = 3;
 // Cosine similarity ranges from -1 to 1; below this, a match is probably
-// unrelated noise rather than a genuine answer.
-const MIN_RELEVANCE_SCORE = 0.3;
+// unrelated noise rather than a genuine answer. Kept fairly low because the
+// embedding model is mostly English-trained, so Roman Urdu / mixed-language
+// queries score lower against English content even when the topic matches.
+const MIN_RELEVANCE_SCORE = 0.2;
 
 function cosineSimilarity(a: number[], b: number[]): number {
   let dot = 0;
