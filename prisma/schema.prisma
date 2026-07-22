@@ -47,3 +47,16 @@ model Chunk {
 
   @@index([documentId])
 }
+
+// An API key issued to a client that is allowed to call the agent's
+// endpoints. Only the SHA-256 hash of the key is stored — the plaintext key
+// is shown once at creation time and never persisted.
+model ApiKey {
+  id         Int       @id @default(autoincrement())
+  keyHash    String    @unique
+  clientName String
+  createdAt  DateTime  @default(now())
+  revokedAt  DateTime?
+
+  @@index([keyHash])
+}

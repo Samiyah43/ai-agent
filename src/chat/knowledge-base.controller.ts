@@ -4,15 +4,18 @@ import {
   Controller,
   Post,
   UploadedFile,
+  UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
+import { ApiKeyGuard } from '../auth/api-key.guard';
 import { IngestDocumentDto } from './dto/ingest-document.dto';
 import { KnowledgeBaseService } from './knowledge-base.service';
 import { extractPdfText } from './pdf-extractor';
 
 const MAX_PDF_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB
 
+@UseGuards(ApiKeyGuard)
 @Controller('knowledge-base')
 export class KnowledgeBaseController {
   constructor(private readonly knowledgeBaseService: KnowledgeBaseService) {}
