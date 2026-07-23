@@ -23,4 +23,10 @@ describe('AppController', () => {
       });
     });
   });
+
+  describe('health', () => {
+    it('should return an ok status', () => {
+      expect(appController.getHealth()).toEqual({ status: 'ok', uptimeSeconds: expect.any(Number) });
+    });
+  });
 });
