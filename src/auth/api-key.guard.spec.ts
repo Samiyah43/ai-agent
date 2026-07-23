@@ -3,8 +3,12 @@ import { PrismaService } from '../prisma/prisma.service';
 import { hashApiKey } from './api-key-hash';
 import { ApiKeyGuard } from './api-key.guard';
 
-function createFakePrisma(plainKeys: { key: string; revokedAt: Date | null }[]) {
-  const apiKeys = plainKeys.map(({ key, revokedAt }) => ({ keyHash: hashApiKey(key), revokedAt }));
+function createFakePrisma(plainKeys: { key: string; clientId?: number; revokedAt: Date | null }[]) {
+  const apiKeys = plainKeys.map(({ key, clientId, revokedAt }) => ({
+    keyHash: hashApiKey(key),
+    clientId: clientId ?? 1,
+    revokedAt,
+  }));
 
   return {
     apiKey: {
@@ -42,8 +46,13 @@ describe('ApiKeyGuard', () => {
   });
 
   it('allows a valid, non-revoked key by comparing its hash', async () => {
-    const guard = new ApiKeyGuard(createFakePrisma([{ key: 'good-key', revokedAt: null }]));
+    const guard = new ApiKeyGuard(createFakePrisma([{ key: 'good-key', clientId: 7, revokedAt: null }]));
+    const request = { header: jest.fn().mockReturnValue('good-key') };
+    const context = {
+      switchToHttp: () => ({ getRequest: () => request }),
+    } as unknown as ExecutionContext;
 
-    await expect(guard.canActivate(createContext('good-key'))).resolves.toBe(true);
+    await expect(guard.canActivate(context)).resolves.toBe(true);
+    expect((request as unknown as { clientId: number }).clientId).toBe(7);
   });
 });

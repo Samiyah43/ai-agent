@@ -17,21 +17,31 @@ function createConfigService(values: Record<string, string | undefined>): Config
   } as unknown as ConfigService;
 }
 
+const CLIENT_ID = 1;
+
 // A tiny in-memory stand-in for PrismaService, so these unit tests don't need
 // a real database — it only supports the two calls ChatService actually makes.
 function createFakePrisma(): PrismaService {
-  const rows: { id: number; conversationId: string; role: string; data: string }[] = [];
+  const rows: { id: number; clientId: number; conversationId: string; role: string; data: string }[] = [];
   let nextId = 1;
 
   return {
     message: {
-      create: jest.fn(async ({ data }: { data: { conversationId: string; role: string; data: string } }) => {
-        const row = { id: nextId++, ...data };
-        rows.push(row);
-        return row;
-      }),
-      findMany: jest.fn(async ({ where }: { where: { conversationId: string } }) =>
-        rows.filter((row) => row.conversationId === where.conversationId).sort((a, b) => a.id - b.id),
+      create: jest.fn(
+        async ({
+          data,
+        }: {
+          data: { clientId: number; conversationId: string; role: string; data: string };
+        }) => {
+          const row = { id: nextId++, ...data };
+          rows.push(row);
+          return row;
+        },
+      ),
+      findMany: jest.fn(async ({ where }: { where: { clientId: number; conversationId: string } }) =>
+        rows
+          .filter((row) => row.clientId === where.clientId && row.conversationId === where.conversationId)
+          .sort((a, b) => a.id - b.id),
       ),
     },
   } as unknown as PrismaService;
@@ -46,7 +56,7 @@ describe('ChatService', () => {
     const configService = createConfigService({});
     const service = new ChatService(configService, createFakePrisma());
 
-    await expect(service.createReply('Hello')).rejects.toBeInstanceOf(
+    await expect(service.createReply(CLIENT_ID,'Hello')).rejects.toBeInstanceOf(
       ServiceUnavailableException,
     );
     expect(mockCreate).not.toHaveBeenCalled();
@@ -57,7 +67,7 @@ describe('ChatService', () => {
     const configService = createConfigService({ OPENAI_API_KEY: 'test-key' });
     const service = new ChatService(configService, createFakePrisma());
 
-    const result = await service.createReply('Hi');
+    const result = await service.createReply(CLIENT_ID,'Hi');
 
     expect(result.reply).toBe('Hello there!');
     expect(result.conversationId).toEqual(expect.any(String));
@@ -73,7 +83,7 @@ describe('ChatService', () => {
     const configService = createConfigService({ OPENAI_API_KEY: 'test-key' });
     const service = new ChatService(configService, createFakePrisma());
 
-    const result = await service.createReply('Hi');
+    const result = await service.createReply(CLIENT_ID,'Hi');
 
     expect(result.reply).toBe('Sorry, I could not generate a reply. Please try again.');
   });
@@ -86,8 +96,8 @@ describe('ChatService', () => {
     const configService = createConfigService({ OPENAI_API_KEY: 'test-key' });
     const service = new ChatService(configService, createFakePrisma());
 
-    const first = await service.createReply('My name is Ali');
-    const second = await service.createReply('What is my name?', first.conversationId);
+    const first = await service.createReply(CLIENT_ID,'My name is Ali');
+    const second = await service.createReply(CLIENT_ID,'What is my name?', first.conversationId);
 
     expect(second.reply).toBe('Your name is Ali.');
     expect(mockCreate).toHaveBeenLastCalledWith(
@@ -126,7 +136,7 @@ describe('ChatService', () => {
     const configService = createConfigService({ OPENAI_API_KEY: 'test-key' });
     const service = new ChatService(configService, createFakePrisma());
 
-    const result = await service.createReply('What is 2 + 2?');
+    const result = await service.createReply(CLIENT_ID,'What is 2 + 2?');
 
     expect(result.reply).toBe('The answer is 4.');
     expect(mockCreate).toHaveBeenCalledTimes(2);
@@ -170,7 +180,7 @@ describe('ChatService', () => {
     const configService = createConfigService({ OPENAI_API_KEY: 'test-key', TAVILY_API_KEY: 'tavily-key' });
     const service = new ChatService(configService, createFakePrisma());
 
-    await service.createReply('Compare ChatGPT, Claude and Gemini');
+    await service.createReply(CLIENT_ID,'Compare ChatGPT, Claude and Gemini');
 
     expect(mockCreate).toHaveBeenNthCalledWith(
       1,
@@ -191,7 +201,7 @@ describe('ChatService', () => {
     const configService = createConfigService({ OPENAI_API_KEY: 'test-key' });
     const service = new ChatService(configService, createFakePrisma());
 
-    await service.createReply('Hi, how are you?');
+    await service.createReply(CLIENT_ID,'Hi, how are you?');
 
     expect(mockCreate).toHaveBeenCalledWith(
       expect.not.objectContaining({ tool_choice: expect.anything() }),
@@ -204,6 +214,6 @@ describe('ChatService', () => {
     const configService = createConfigService({ OPENAI_API_KEY: 'test-key' });
     const service = new ChatService(configService, createFakePrisma());
 
-    await expect(service.createReply('Hi')).rejects.toBeInstanceOf(BadGatewayException);
+    await expect(service.createReply(CLIENT_ID,'Hi')).rejects.toBeInstanceOf(BadGatewayException);
   });
 });

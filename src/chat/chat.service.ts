@@ -61,7 +61,7 @@ export class ChatService {
     this.client = apiKey ? new OpenAI({ apiKey, baseURL }) : null;
   }
 
-  async createReply(message: string, conversationId?: string): Promise<ChatReply> {
+  async createReply(clientId: number, message: string, conversationId?: string): Promise<ChatReply> {
     if (!this.client) {
       throw new ServiceUnavailableException(
         'OpenAI is not configured. Add OPENAI_API_KEY to your .env file and restart the server.',
@@ -69,11 +69,11 @@ export class ChatService {
     }
 
     const id = conversationId ?? randomUUID();
-    const history = await this.loadHistory(id);
+    const history = await this.loadHistory(clientId, id);
 
     const userMessage: OpenAI.Chat.ChatCompletionMessageParam = { role: 'user', content: message };
     history.push(userMessage);
-    await this.persist(id, userMessage);
+    await this.persist(clientId, id, userMessage);
 
     const model = this.configService.get<string>('OPENAI_MODEL') ?? 'gpt-5-mini';
 
@@ -107,22 +107,22 @@ export class ChatService {
         }
 
         history.push(responseMessage);
-        await this.persist(id, responseMessage);
+        await this.persist(clientId, id, responseMessage);
 
         for (const toolCall of toolCalls) {
           const toolMessage: OpenAI.Chat.ChatCompletionMessageParam = {
             role: 'tool',
             tool_call_id: toolCall.id,
-            content: await this.runTool(toolCall),
+            content: await this.runTool(toolCall, clientId),
           };
           history.push(toolMessage);
-          await this.persist(id, toolMessage);
+          await this.persist(clientId, id, toolMessage);
         }
       }
 
       reply ??= 'Sorry, I could not generate a reply after multiple tool calls. Please try again.';
 
-      await this.persist(id, { role: 'assistant', content: reply });
+      await this.persist(clientId, id, { role: 'assistant', content: reply });
 
       return { reply, conversationId: id };
     } catch (error) {
@@ -134,10 +134,15 @@ export class ChatService {
   }
 
   // Loads a conversation's messages from the database, oldest first. A brand-new
-  // conversationId has no rows yet, so we seed it with the system prompt.
-  private async loadHistory(conversationId: string): Promise<OpenAI.Chat.ChatCompletionMessageParam[]> {
+  // conversationId has no rows yet, so we seed it with the system prompt. Scoping
+  // by clientId too means a conversationId from another client just looks new
+  // here, rather than leaking that client's history.
+  private async loadHistory(
+    clientId: number,
+    conversationId: string,
+  ): Promise<OpenAI.Chat.ChatCompletionMessageParam[]> {
     const rows = await this.prisma.message.findMany({
-      where: { conversationId },
+      where: { clientId, conversationId },
       orderBy: { id: 'asc' },
     });
 
@@ -146,7 +151,7 @@ export class ChatService {
         role: 'system',
         content: CHATBOT_INSTRUCTIONS,
       };
-      await this.persist(conversationId, systemMessage);
+      await this.persist(clientId, conversationId, systemMessage);
       return [systemMessage];
     }
 
@@ -167,15 +172,19 @@ export class ChatService {
   }
 
   private async persist(
+    clientId: number,
     conversationId: string,
     message: OpenAI.Chat.ChatCompletionMessageParam,
   ): Promise<void> {
     await this.prisma.message.create({
-      data: { conversationId, role: message.role, data: JSON.stringify(message) },
+      data: { clientId, conversationId, role: message.role, data: JSON.stringify(message) },
     });
   }
 
-  private async runTool(toolCall: OpenAI.Chat.ChatCompletionMessageToolCall): Promise<string> {
+  private async runTool(
+    toolCall: OpenAI.Chat.ChatCompletionMessageToolCall,
+    clientId: number,
+  ): Promise<string> {
     if (toolCall.type !== 'function') {
       return `Error: unsupported tool call type "${toolCall.type}".`;
     }
@@ -198,7 +207,7 @@ export class ChatService {
           break;
         case 'search_knowledge_base':
           result = args.query
-            ? await runKnowledgeBase(args.query, this.prisma)
+            ? await runKnowledgeBase(args.query, clientId, this.prisma)
             : 'Error: no query was provided.';
           break;
         case 'web_search':

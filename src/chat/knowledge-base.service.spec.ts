@@ -9,17 +9,19 @@ jest.mock('./embeddings', () => ({
 
 const mockEmbedText = embedText as jest.Mock;
 
+const CLIENT_ID = 1;
+
 // A tiny in-memory stand-in for PrismaService, matching the style used in
 // chat.service.spec.ts's createFakePrisma().
 function createFakePrisma() {
-  const documents: { id: number; title: string; content: string }[] = [];
+  const documents: { id: number; clientId: number; title: string; content: string }[] = [];
   const chunks: { id: number; documentId: number; content: string; embedding: string }[] = [];
   let nextDocumentId = 1;
   let nextChunkId = 1;
 
   const prisma = {
     document: {
-      create: jest.fn(async ({ data }: { data: { title: string; content: string } }) => {
+      create: jest.fn(async ({ data }: { data: { clientId: number; title: string; content: string } }) => {
         const row = { id: nextDocumentId++, ...data };
         documents.push(row);
         return row;
@@ -47,7 +49,7 @@ describe('KnowledgeBaseService', () => {
     const { prisma, documents, chunks } = createFakePrisma();
     const service = new KnowledgeBaseService(prisma);
 
-    const result = await service.ingestDocument('Refund Policy', 'Refunds are available within 30 days.');
+    const result = await service.ingestDocument(CLIENT_ID,'Refund Policy', 'Refunds are available within 30 days.');
 
     expect(documents).toHaveLength(1);
     expect(chunks).toHaveLength(1);
@@ -60,7 +62,7 @@ describe('KnowledgeBaseService', () => {
     const { prisma, chunks } = createFakePrisma();
     const service = new KnowledgeBaseService(prisma);
 
-    const result = await service.ingestDocument('Long Doc', 'a'.repeat(2000));
+    const result = await service.ingestDocument(CLIENT_ID,'Long Doc', 'a'.repeat(2000));
 
     expect(result.chunkCount).toBeGreaterThan(1);
     expect(chunks).toHaveLength(result.chunkCount);
@@ -71,6 +73,6 @@ describe('KnowledgeBaseService', () => {
     const { prisma } = createFakePrisma();
     const service = new KnowledgeBaseService(prisma);
 
-    await expect(service.ingestDocument('Empty Doc', '   ')).rejects.toBeInstanceOf(BadRequestException);
+    await expect(service.ingestDocument(CLIENT_ID,'Empty Doc', '   ')).rejects.toBeInstanceOf(BadRequestException);
   });
 });

@@ -40,13 +40,16 @@ function cosineSimilarity(a: number[], b: number[]): number {
   return dot / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
-export async function runKnowledgeBase(query: string, prisma: PrismaService): Promise<string> {
+export async function runKnowledgeBase(query: string, clientId: number, prisma: PrismaService): Promise<string> {
   if (!query.trim()) {
     return 'Error: no query was provided.';
   }
 
   try {
-    const chunks = await prisma.chunk.findMany({ include: { document: true } });
+    const chunks = await prisma.chunk.findMany({
+      where: { document: { clientId } },
+      include: { document: true },
+    });
     if (!chunks.length) {
       return 'Error: the knowledge base is empty. No documents have been ingested yet.';
     }

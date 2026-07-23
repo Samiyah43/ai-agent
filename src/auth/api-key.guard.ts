@@ -3,12 +3,18 @@ import { Request } from 'express';
 import { PrismaService } from '../prisma/prisma.service';
 import { hashApiKey } from './api-key-hash';
 
+// Augments the request with the caller's tenant, so every downstream
+// controller/service can scope its queries without re-deriving it.
+export interface RequestWithClient extends Request {
+  clientId: number;
+}
+
 @Injectable()
 export class ApiKeyGuard implements CanActivate {
   constructor(private readonly prisma: PrismaService) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
-    const request = context.switchToHttp().getRequest<Request>();
+    const request = context.switchToHttp().getRequest<RequestWithClient>();
     const key = request.header('x-api-key');
 
     if (!key) {
@@ -21,6 +27,7 @@ export class ApiKeyGuard implements CanActivate {
       throw new UnauthorizedException('Invalid or revoked API key.');
     }
 
+    request.clientId = apiKey.clientId;
     return true;
   }
 }

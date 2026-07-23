@@ -13,14 +13,28 @@ datasource db {
   provider = "sqlite"
 }
 
+// A tenant of the system — e.g. a business that pays to use this agent.
+// Every document, conversation, and API key belongs to exactly one client,
+// so one client's data is never visible to another.
+model Client {
+  id        Int       @id @default(autoincrement())
+  name      String
+  createdAt DateTime  @default(now())
+  apiKeys   ApiKey[]
+  documents Document[]
+  messages  Message[]
+}
+
 model Message {
   id             Int      @id @default(autoincrement())
+  clientId       Int
   conversationId String
   role           String
   data           String
   createdAt      DateTime @default(now())
+  client         Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
 
-  @@index([conversationId])
+  @@index([clientId, conversationId])
 }
 
 // A source document that was ingested into the knowledge base (e.g. a policy
@@ -28,10 +42,14 @@ model Message {
 // strategy changes.
 model Document {
   id        Int      @id @default(autoincrement())
+  clientId  Int
   title     String
   content   String
   createdAt DateTime @default(now())
+  client    Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
   chunks    Chunk[]
+
+  @@index([clientId])
 }
 
 // A chunk of a Document, plus its embedding vector (stored as a JSON string
@@ -53,10 +71,12 @@ model Chunk {
 // is shown once at creation time and never persisted.
 model ApiKey {
   id         Int       @id @default(autoincrement())
+  clientId   Int
   keyHash    String    @unique
-  clientName String
   createdAt  DateTime  @default(now())
   revokedAt  DateTime?
+  client     Client    @relation(fields: [clientId], references: [id], onDelete: Cascade)
 
   @@index([keyHash])
+  @@index([clientId])
 }

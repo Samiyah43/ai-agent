@@ -14,8 +14,13 @@ async function main() {
     adapter: new PrismaBetterSqlite3({ url: process.env.DATABASE_URL ?? 'file:./dev.db' }),
   });
 
+  // Reuses an existing client if the name matches, so re-running this script
+  // to issue a second key for the same client doesn't create a duplicate tenant.
+  let client = await prisma.client.findFirst({ where: { name: clientName } });
+  client ??= await prisma.client.create({ data: { name: clientName } });
+
   const key = randomBytes(32).toString('hex');
-  await prisma.apiKey.create({ data: { keyHash: hashApiKey(key), clientName } });
+  await prisma.apiKey.create({ data: { keyHash: hashApiKey(key), clientId: client.id } });
   await prisma.$disconnect();
 
   console.log(`Created API key for "${clientName}":`);

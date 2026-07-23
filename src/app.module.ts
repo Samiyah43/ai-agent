@@ -9,7 +9,12 @@ import { ChatModule } from './chat/chat.module';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
-    ThrottlerModule.forRoot([{ name: 'default', ttl: 60_000, limit: 20 }]),
+    // Broad, IP-based safety net against gross abuse (e.g. flooding with many
+    // invalid keys). The real per-client fair-usage budget is enforced
+    // separately by ClientThrottlerGuard on authenticated routes, so this
+    // limit is intentionally generous — it shouldn't be the thing that
+    // trips when several distinct clients share an IP (e.g. a proxy/NAT).
+    ThrottlerModule.forRoot([{ name: 'default', ttl: 60_000, limit: 100 }]),
     ChatModule,
   ],
   controllers: [AppController],
