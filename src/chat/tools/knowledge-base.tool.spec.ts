@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { embedText } from '../embeddings';
 import { runKnowledgeBase } from './knowledge-base.tool';
@@ -70,7 +71,7 @@ describe('runKnowledgeBase', () => {
   });
 
   it('returns a generic error when the search fails unexpectedly', async () => {
-    jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
     const result = await runKnowledgeBase('refund policy', CLIENT_ID, createFakePrisma(new Error('db down')));
 
     expect(result).toBe('Error: could not search the knowledge base right now.');

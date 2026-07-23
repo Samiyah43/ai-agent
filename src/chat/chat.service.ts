@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import { BadGatewayException, Injectable, ServiceUnavailableException } from '@nestjs/common';
+import { BadGatewayException, Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import OpenAI from 'openai';
+import { MetricsService } from '../metrics/metrics.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { calculatorToolDefinition, runCalculator } from './tools/calculator.tool';
 import { knowledgeBaseToolDefinition, runKnowledgeBase } from './tools/knowledge-base.tool';
@@ -51,10 +52,12 @@ export interface ChatReply {
 @Injectable()
 export class ChatService {
   private readonly client: OpenAI | null;
+  private readonly logger = new Logger(ChatService.name);
 
   constructor(
     private readonly configService: ConfigService,
     private readonly prisma: PrismaService,
+    private readonly metrics: MetricsService,
   ) {
     const apiKey = this.configService.get<string>('OPENAI_API_KEY');
     const baseURL = this.configService.get<string>('OPENAI_BASE_URL');
@@ -126,7 +129,8 @@ export class ChatService {
 
       return { reply, conversationId: id };
     } catch (error) {
-      console.error('OpenAI request failed:', error);
+      this.metrics.chatErrorsTotal.inc();
+      this.logger.error('OpenAI request failed', error instanceof Error ? error.stack : error);
       throw new BadGatewayException(
         'The AI service could not respond right now. Please try again in a moment.',
       );
@@ -195,7 +199,7 @@ export class ChatService {
         location?: string;
         query?: string;
       };
-      console.log(`[tool call] ${toolCall.function.name}(${JSON.stringify(args)})`);
+      this.logger.log(`[tool call] ${toolCall.function.name}(${JSON.stringify(args)})`);
 
       let result: string;
       switch (toolCall.function.name) {
@@ -219,9 +223,14 @@ export class ChatService {
           result = `Error: unknown tool "${toolCall.function.name}".`;
       }
 
-      console.log(`[tool result] ${toolCall.function.name} -> ${result.slice(0, 200)}`);
+      this.logger.log(`[tool result] ${toolCall.function.name} -> ${result.slice(0, 200)}`);
+      this.metrics.toolCallsTotal.inc({
+        tool: toolCall.function.name,
+        outcome: result.startsWith('Error:') ? 'error' : 'ok',
+      });
       return result;
     } catch {
+      this.metrics.toolCallsTotal.inc({ tool: toolCall.function.name, outcome: 'error' });
       return 'Error: could not parse the tool arguments.';
     }
   }

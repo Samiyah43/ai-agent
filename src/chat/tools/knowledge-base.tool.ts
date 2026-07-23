@@ -1,6 +1,9 @@
+import { Logger } from '@nestjs/common';
 import OpenAI from 'openai';
 import { PrismaService } from '../../prisma/prisma.service';
 import { embedText } from '../embeddings';
+
+const logger = new Logger('KnowledgeBaseTool');
 
 export const knowledgeBaseToolDefinition: OpenAI.Chat.ChatCompletionTool = {
   type: 'function',
@@ -68,7 +71,7 @@ export async function runKnowledgeBase(query: string, clientId: number, prisma: 
       .map((r, i) => `[${i + 1}] From "${r.chunk.document.title}" (similarity ${r.score.toFixed(2)}):\n${r.chunk.content}`)
       .join('\n\n');
   } catch (error) {
-    console.error('Knowledge base search failed:', error);
+    logger.error('Knowledge base search failed', error instanceof Error ? error.stack : error);
     return 'Error: could not search the knowledge base right now.';
   }
 }

@@ -1,7 +1,17 @@
-import { BadGatewayException, ServiceUnavailableException } from '@nestjs/common';
+import { BadGatewayException, Logger, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { MetricsService } from '../metrics/metrics.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { ChatService } from './chat.service';
+
+// ChatService only calls .inc() on these two counters — a minimal stand-in
+// is enough, matching the style of createFakePrisma() below.
+function createFakeMetrics(): MetricsService {
+  return {
+    chatErrorsTotal: { inc: jest.fn() },
+    toolCallsTotal: { inc: jest.fn() },
+  } as unknown as MetricsService;
+}
 
 const mockCreate = jest.fn();
 
@@ -54,7 +64,7 @@ describe('ChatService', () => {
 
   it('explains how to configure the API when no key exists', async () => {
     const configService = createConfigService({});
-    const service = new ChatService(configService, createFakePrisma());
+    const service = new ChatService(configService, createFakePrisma(), createFakeMetrics());
 
     await expect(service.createReply(CLIENT_ID,'Hello')).rejects.toBeInstanceOf(
       ServiceUnavailableException,
@@ -65,7 +75,7 @@ describe('ChatService', () => {
   it('returns the AI reply when OpenAI responds successfully', async () => {
     mockCreate.mockResolvedValue({ choices: [{ message: { content: 'Hello there!' } }] });
     const configService = createConfigService({ OPENAI_API_KEY: 'test-key' });
-    const service = new ChatService(configService, createFakePrisma());
+    const service = new ChatService(configService, createFakePrisma(), createFakeMetrics());
 
     const result = await service.createReply(CLIENT_ID,'Hi');
 
@@ -81,7 +91,7 @@ describe('ChatService', () => {
   it('falls back to a default message when OpenAI returns no text', async () => {
     mockCreate.mockResolvedValue({ choices: [{ message: { content: '' } }] });
     const configService = createConfigService({ OPENAI_API_KEY: 'test-key' });
-    const service = new ChatService(configService, createFakePrisma());
+    const service = new ChatService(configService, createFakePrisma(), createFakeMetrics());
 
     const result = await service.createReply(CLIENT_ID,'Hi');
 
@@ -94,7 +104,7 @@ describe('ChatService', () => {
       .mockResolvedValueOnce({ choices: [{ message: { content: 'Your name is Ali.' } }] });
 
     const configService = createConfigService({ OPENAI_API_KEY: 'test-key' });
-    const service = new ChatService(configService, createFakePrisma());
+    const service = new ChatService(configService, createFakePrisma(), createFakeMetrics());
 
     const first = await service.createReply(CLIENT_ID,'My name is Ali');
     const second = await service.createReply(CLIENT_ID,'What is my name?', first.conversationId);
@@ -134,7 +144,7 @@ describe('ChatService', () => {
       });
 
     const configService = createConfigService({ OPENAI_API_KEY: 'test-key' });
-    const service = new ChatService(configService, createFakePrisma());
+    const service = new ChatService(configService, createFakePrisma(), createFakeMetrics());
 
     const result = await service.createReply(CLIENT_ID,'What is 2 + 2?');
 
@@ -178,7 +188,7 @@ describe('ChatService', () => {
       });
 
     const configService = createConfigService({ OPENAI_API_KEY: 'test-key', TAVILY_API_KEY: 'tavily-key' });
-    const service = new ChatService(configService, createFakePrisma());
+    const service = new ChatService(configService, createFakePrisma(), createFakeMetrics());
 
     await service.createReply(CLIENT_ID,'Compare ChatGPT, Claude and Gemini');
 
@@ -199,7 +209,7 @@ describe('ChatService', () => {
   it('does not force tool_choice for ordinary questions', async () => {
     mockCreate.mockResolvedValue({ choices: [{ message: { content: 'Hello there!' } }] });
     const configService = createConfigService({ OPENAI_API_KEY: 'test-key' });
-    const service = new ChatService(configService, createFakePrisma());
+    const service = new ChatService(configService, createFakePrisma(), createFakeMetrics());
 
     await service.createReply(CLIENT_ID,'Hi, how are you?');
 
@@ -209,10 +219,10 @@ describe('ChatService', () => {
   });
 
   it('throws BadGatewayException when the OpenAI request fails', async () => {
-    jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
     mockCreate.mockRejectedValue(new Error('network error'));
     const configService = createConfigService({ OPENAI_API_KEY: 'test-key' });
-    const service = new ChatService(configService, createFakePrisma());
+    const service = new ChatService(configService, createFakePrisma(), createFakeMetrics());
 
     await expect(service.createReply(CLIENT_ID,'Hi')).rejects.toBeInstanceOf(BadGatewayException);
   });

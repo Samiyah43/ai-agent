@@ -5,6 +5,8 @@ import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { ChatModule } from './chat/chat.module';
+import { MetricsModule } from './metrics/metrics.module';
+import { PrismaModule } from './prisma/prisma.module';
 
 @Module({
   imports: [
@@ -15,6 +17,8 @@ import { ChatModule } from './chat/chat.module';
     // limit is intentionally generous — it shouldn't be the thing that
     // trips when several distinct clients share an IP (e.g. a proxy/NAT).
     ThrottlerModule.forRoot([{ name: 'default', ttl: 60_000, limit: 100 }]),
+    PrismaModule,
+    MetricsModule,
     ChatModule,
   ],
   controllers: [AppController],
