@@ -6,6 +6,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { calculatorToolDefinition, runCalculator } from './tools/calculator.tool';
 import { knowledgeBaseToolDefinition, runKnowledgeBase } from './tools/knowledge-base.tool';
 import { runWeather, weatherToolDefinition } from './tools/weather.tool';
+import { runWebSearch, webSearchToolDefinition } from './tools/web-search.tool';
 
 const CHATBOT_INSTRUCTIONS = [
   'You are a helpful, beginner-friendly AI chatbot.',
@@ -16,17 +17,31 @@ const CHATBOT_INSTRUCTIONS = [
   'When you answer using results from the search_knowledge_base tool, only state facts that are explicitly present in those results.',
   'Do not add extra steps, numbers, features, or claims that are not in the retrieved text, even if they sound plausible.',
   'If the retrieved text does not fully answer the question, say what it does cover and clearly note that the rest is not in the knowledge base.',
+  'For questions about current events, recent news, live prices, or anything that changes over time or could be after your training cutoff, call web_search instead of answering from memory. This includes comparisons or facts about specific products, companies, tools, or technologies (e.g. "compare X and Y", "which is better", specs, pricing, version numbers) — these change often and your own knowledge of them may be outdated or wrong, so verify with web_search rather than guessing.',
+  'When you answer using web_search results, end your reply with a "Sources" section listing the URLs from the tool results, so the user can verify the information themselves.',
 ].join(' ');
 
 const TOOLS: OpenAI.Chat.ChatCompletionTool[] = [
   calculatorToolDefinition,
   weatherToolDefinition,
   knowledgeBaseToolDefinition,
+  webSearchToolDefinition,
 ];
 
 // Keeps the system message plus this many of the most recent messages, so a
 // long-running conversation doesn't grow the prompt (and cost) forever.
 const MAX_HISTORY_MESSAGES = 20;
+
+// Small/free models often "think" they already know the answer to questions like
+// this and skip web_search despite the system instructions, then answer from
+// stale training data. Rather than relying entirely on the model's own judgement,
+// these keywords force a web_search on the first round as a deterministic fallback.
+const CURRENT_INFO_PATTERN =
+  /\b(compare|comparison|vs\.?|versus|which is better|latest|newest|current|price|pricing|news|update|release|version)\b|\b(aaj|abhi|taza|khabar|keemat)\b/i;
+
+function needsWebSearch(message: string): boolean {
+  return CURRENT_INFO_PATTERN.test(message);
+}
 
 export interface ChatReply {
   reply: string;
@@ -63,19 +78,34 @@ export class ChatService {
     const model = this.configService.get<string>('OPENAI_MODEL') ?? 'gpt-5-mini';
 
     try {
-      const response = await this.client.chat.completions.create({
-        model,
-        messages: history,
-        tools: TOOLS,
-      });
+      let reply: string | undefined;
 
-      const responseMessage = response.choices[0]?.message;
-      const toolCalls = responseMessage?.tool_calls;
-      let reply: string;
+      // A single user message can need more than one tool (e.g. "news and weather"),
+      // and a model can decide to call another tool after seeing the first tool's
+      // result. Tools must stay available on every round, or the model can attempt
+      // a call the API then rejects. MAX_TOOL_ROUNDS is a safety cap against a model
+      // that keeps calling tools forever.
+      const MAX_TOOL_ROUNDS = 5;
+      const forceWebSearch = needsWebSearch(message);
 
-      if (!toolCalls?.length) {
-        reply = responseMessage?.content || 'Sorry, I could not generate a reply. Please try again.';
-      } else {
+      for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+        const response = await this.client.chat.completions.create({
+          model,
+          messages: history,
+          tools: TOOLS,
+          ...(round === 0 && forceWebSearch
+            ? { tool_choice: { type: 'function' as const, function: { name: 'web_search' } } }
+            : {}),
+        });
+
+        const responseMessage = response.choices[0]?.message;
+        const toolCalls = responseMessage?.tool_calls;
+
+        if (!toolCalls?.length) {
+          reply = responseMessage?.content || 'Sorry, I could not generate a reply. Please try again.';
+          break;
+        }
+
         history.push(responseMessage);
         await this.persist(id, responseMessage);
 
@@ -88,12 +118,9 @@ export class ChatService {
           history.push(toolMessage);
           await this.persist(id, toolMessage);
         }
-
-        const followUp = await this.client.chat.completions.create({ model, messages: history });
-        reply =
-          followUp.choices[0]?.message?.content ||
-          'Sorry, I could not generate a reply. Please try again.';
       }
+
+      reply ??= 'Sorry, I could not generate a reply after multiple tool calls. Please try again.';
 
       await this.persist(id, { role: 'assistant', content: reply });
 
@@ -172,6 +199,11 @@ export class ChatService {
         case 'search_knowledge_base':
           result = args.query
             ? await runKnowledgeBase(args.query, this.prisma)
+            : 'Error: no query was provided.';
+          break;
+        case 'web_search':
+          result = args.query
+            ? await runWebSearch(args.query, this.configService.get<string>('TAVILY_API_KEY'))
             : 'Error: no query was provided.';
           break;
         default:

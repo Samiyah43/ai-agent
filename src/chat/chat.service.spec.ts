@@ -139,6 +139,65 @@ describe('ChatService', () => {
     );
   });
 
+  it('forces a web_search tool_choice on the first round for current-info questions', async () => {
+    const originalFetch = global.fetch;
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ results: [{ title: 'Result', url: 'https://example.com', content: 'text' }] }),
+    }) as unknown as typeof fetch;
+
+    mockCreate
+      .mockResolvedValueOnce({
+        choices: [
+          {
+            message: {
+              content: null,
+              tool_calls: [
+                {
+                  id: 'call_1',
+                  type: 'function',
+                  function: { name: 'web_search', arguments: '{"query":"ChatGPT vs Claude vs Gemini"}' },
+                },
+              ],
+            },
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        choices: [{ message: { content: 'Here is a comparison with sources.' } }],
+      });
+
+    const configService = createConfigService({ OPENAI_API_KEY: 'test-key', TAVILY_API_KEY: 'tavily-key' });
+    const service = new ChatService(configService, createFakePrisma());
+
+    await service.createReply('Compare ChatGPT, Claude and Gemini');
+
+    expect(mockCreate).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        tool_choice: { type: 'function', function: { name: 'web_search' } },
+      }),
+    );
+    expect(mockCreate).toHaveBeenNthCalledWith(
+      2,
+      expect.not.objectContaining({ tool_choice: expect.anything() }),
+    );
+
+    global.fetch = originalFetch;
+  });
+
+  it('does not force tool_choice for ordinary questions', async () => {
+    mockCreate.mockResolvedValue({ choices: [{ message: { content: 'Hello there!' } }] });
+    const configService = createConfigService({ OPENAI_API_KEY: 'test-key' });
+    const service = new ChatService(configService, createFakePrisma());
+
+    await service.createReply('Hi, how are you?');
+
+    expect(mockCreate).toHaveBeenCalledWith(
+      expect.not.objectContaining({ tool_choice: expect.anything() }),
+    );
+  });
+
   it('throws BadGatewayException when the OpenAI request fails', async () => {
     jest.spyOn(console, 'error').mockImplementation(() => undefined);
     mockCreate.mockRejectedValue(new Error('network error'));
