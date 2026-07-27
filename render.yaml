@@ -1,3 +1,8 @@
+databases:
+  - name: ai-agent-db
+    plan: free
+    postgresMajorVersion: "16"
+
 services:
   - type: web
     name: ai-agent
@@ -13,4 +18,6 @@ services:
       - key: OPENAI_MODEL
         value: openai/gpt-oss-20b
       - key: DATABASE_URL
-        value: file:./dev.db
+        fromDatabase:
+          name: ai-agent-db
+          property: connectionString
