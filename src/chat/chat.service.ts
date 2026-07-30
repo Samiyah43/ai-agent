@@ -4,45 +4,18 @@ import { ConfigService } from '@nestjs/config';
 import OpenAI from 'openai';
 import { MetricsService } from '../metrics/metrics.service';
 import { PrismaService } from '../prisma/prisma.service';
-import { calculatorToolDefinition, runCalculator } from './tools/calculator.tool';
-import { knowledgeBaseToolDefinition, runKnowledgeBase } from './tools/knowledge-base.tool';
-import { runWeather, weatherToolDefinition } from './tools/weather.tool';
-import { runWebSearch, webSearchToolDefinition } from './tools/web-search.tool';
+import { needsWebSearch, researchAgent } from './agents/research.agent';
+import { routeToAgent } from './agents/router';
+import { runCalculator } from './tools/calculator.tool';
+import { runKnowledgeBase } from './tools/knowledge-base.tool';
+import { runWeather } from './tools/weather.tool';
+import { runWebSearch } from './tools/web-search.tool';
 
-const CHATBOT_INSTRUCTIONS = [
-  'You are a helpful, beginner-friendly AI chatbot.',
-  'Reply clearly and honestly.',
-  'Use short sections or steps when they make an explanation easier to follow.',
-  'If the user writes in Roman Urdu, reply in Roman Urdu unless they ask for another language.',
-  'For any question that could plausibly be about a company policy, procedure, or other topic that might be documented (e.g. leave, remote work, security, benefits, "the document", "this file"), you must call search_knowledge_base first. Never rely on your own general/textbook knowledge for these topics, even if you think you already know a typical answer — the user only wants what is actually in their own uploaded documents. Only ask the user to clarify if the tool returns no relevant results.',
-  'When you answer using results from the search_knowledge_base tool, only state facts that are explicitly present in those results.',
-  'Do not add extra steps, numbers, features, or claims that are not in the retrieved text, even if they sound plausible.',
-  'If the retrieved text does not fully answer the question, say what it does cover and clearly note that the rest is not in the knowledge base.',
-  'For questions about current events, recent news, live prices, or anything that changes over time or could be after your training cutoff, call web_search instead of answering from memory. This includes comparisons or facts about specific products, companies, tools, or technologies (e.g. "compare X and Y", "which is better", specs, pricing, version numbers) — these change often and your own knowledge of them may be outdated or wrong, so verify with web_search rather than guessing.',
-  'When you answer using web_search results, end your reply with a "Sources" section listing the URLs from the tool results, so the user can verify the information themselves.',
-].join(' ');
-
-const TOOLS: OpenAI.Chat.ChatCompletionTool[] = [
-  calculatorToolDefinition,
-  weatherToolDefinition,
-  knowledgeBaseToolDefinition,
-  webSearchToolDefinition,
-];
-
-// Keeps the system message plus this many of the most recent messages, so a
-// long-running conversation doesn't grow the prompt (and cost) forever.
+// Keeps this many of the most recent messages, so a long-running conversation
+// doesn't grow the prompt (and cost) forever. The system prompt is added
+// separately at request time (see createReply), based on whichever agent the
+// router picks for the current message, so it isn't counted here.
 const MAX_HISTORY_MESSAGES = 20;
-
-// Small/free models often "think" they already know the answer to questions like
-// this and skip web_search despite the system instructions, then answer from
-// stale training data. Rather than relying entirely on the model's own judgement,
-// these keywords force a web_search on the first round as a deterministic fallback.
-const CURRENT_INFO_PATTERN =
-  /\b(compare|comparison|vs\.?|versus|which is better|latest|newest|current|price|pricing|news|update|release|version)\b|\b(aaj|abhi|taza|khabar|keemat)\b/i;
-
-function needsWebSearch(message: string): boolean {
-  return CURRENT_INFO_PATTERN.test(message);
-}
 
 export interface ChatReply {
   reply: string;
@@ -80,6 +53,18 @@ export class ChatService {
 
     const model = this.configService.get<string>('OPENAI_MODEL') ?? 'gpt-5-mini';
 
+    // Router picks a specialist agent per message (not persisted — a
+    // conversation can be answered by a different agent each turn). The
+    // system prompt therefore isn't stored in the DB; it's rebuilt here from
+    // whichever agent handles this turn and prepended just for this call.
+    const agent = routeToAgent(message);
+    this.metrics.agentRequestsTotal.inc({ agent: agent.name });
+    this.logger.log(`[router] "${message.slice(0, 80)}" -> ${agent.name}`);
+    const systemMessage: OpenAI.Chat.ChatCompletionMessageParam = {
+      role: 'system',
+      content: agent.systemPrompt,
+    };
+
     try {
       let reply: string | undefined;
 
@@ -89,13 +74,13 @@ export class ChatService {
       // a call the API then rejects. MAX_TOOL_ROUNDS is a safety cap against a model
       // that keeps calling tools forever.
       const MAX_TOOL_ROUNDS = 5;
-      const forceWebSearch = needsWebSearch(message);
+      const forceWebSearch = agent === researchAgent && needsWebSearch(message);
 
       for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
         const response = await this.client.chat.completions.create({
           model,
-          messages: history,
-          tools: TOOLS,
+          messages: [systemMessage, ...history],
+          ...(agent.tools.length ? { tools: agent.tools } : {}),
           ...(round === 0 && forceWebSearch
             ? { tool_choice: { type: 'function' as const, function: { name: 'web_search' } } }
             : {}),
@@ -137,10 +122,12 @@ export class ChatService {
     }
   }
 
-  // Loads a conversation's messages from the database, oldest first. A brand-new
-  // conversationId has no rows yet, so we seed it with the system prompt. Scoping
-  // by clientId too means a conversationId from another client just looks new
-  // here, rather than leaking that client's history.
+  // Loads a conversation's messages from the database, oldest first, excluding
+  // any system row (older conversations, from before per-message routing, may
+  // still have one persisted — the fresh agent-specific system prompt built in
+  // createReply replaces it). Scoping by clientId too means a conversationId
+  // from another client just looks new here, rather than leaking that client's
+  // history.
   private async loadHistory(
     clientId: number,
     conversationId: string,
@@ -150,29 +137,19 @@ export class ChatService {
       orderBy: { id: 'asc' },
     });
 
-    if (!rows.length) {
-      const systemMessage: OpenAI.Chat.ChatCompletionMessageParam = {
-        role: 'system',
-        content: CHATBOT_INSTRUCTIONS,
-      };
-      await this.persist(clientId, conversationId, systemMessage);
-      return [systemMessage];
-    }
-
-    const history = rows.map((row) => JSON.parse(row.data) as OpenAI.Chat.ChatCompletionMessageParam);
+    const history = rows
+      .map((row) => JSON.parse(row.data) as OpenAI.Chat.ChatCompletionMessageParam)
+      .filter((row) => row.role !== 'system');
     return this.trimForModel(history);
   }
 
-  // Every message ever sent is kept in the database, but only the system message
-  // plus the most recent messages are sent to the model, so cost/context stays bounded.
+  // Only the most recent messages are sent to the model, so cost/context stays
+  // bounded on a long-running conversation. Every message ever sent is still
+  // kept in the database (see persist()).
   private trimForModel(
     history: OpenAI.Chat.ChatCompletionMessageParam[],
   ): OpenAI.Chat.ChatCompletionMessageParam[] {
-    if (history.length <= MAX_HISTORY_MESSAGES) {
-      return history;
-    }
-    const [systemMessage] = history;
-    return [systemMessage, ...history.slice(-(MAX_HISTORY_MESSAGES - 1))];
+    return history.slice(-MAX_HISTORY_MESSAGES);
   }
 
   private async persist(

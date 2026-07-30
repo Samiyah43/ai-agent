@@ -36,6 +36,13 @@ export class MetricsService {
     registers: [this.registry],
   });
 
+  readonly agentRequestsTotal = new Counter({
+    name: 'agent_requests_total',
+    help: 'Total /chat requests routed to each specialist agent, by agent name',
+    labelNames: ['agent'] as const,
+    registers: [this.registry],
+  });
+
   constructor() {
     collectDefaultMetrics({ register: this.registry });
   }

@@ -10,6 +10,7 @@ function createFakeMetrics(): MetricsService {
   return {
     chatErrorsTotal: { inc: jest.fn() },
     toolCallsTotal: { inc: jest.fn() },
+    agentRequestsTotal: { inc: jest.fn() },
   } as unknown as MetricsService;
 }
 
@@ -216,6 +217,42 @@ describe('ChatService', () => {
     expect(mockCreate).toHaveBeenCalledWith(
       expect.not.objectContaining({ tool_choice: expect.anything() }),
     );
+  });
+
+  it('routes a math question to the math-data agent (only calculator/weather tools offered)', async () => {
+    mockCreate.mockResolvedValue({ choices: [{ message: { content: '4' } }] });
+    const configService = createConfigService({ OPENAI_API_KEY: 'test-key' });
+    const service = new ChatService(configService, createFakePrisma(), createFakeMetrics());
+
+    await service.createReply(CLIENT_ID, 'What is 2 + 2?');
+
+    const toolNames = (mockCreate.mock.calls[0][0].tools as { function: { name: string } }[]).map(
+      (tool) => tool.function.name,
+    );
+    expect(toolNames.sort()).toEqual(['calculator', 'get_weather']);
+  });
+
+  it('routes small talk to the general agent (no tools offered)', async () => {
+    mockCreate.mockResolvedValue({ choices: [{ message: { content: 'Hey there!' } }] });
+    const configService = createConfigService({ OPENAI_API_KEY: 'test-key' });
+    const service = new ChatService(configService, createFakePrisma(), createFakeMetrics());
+
+    await service.createReply(CLIENT_ID, 'Hello!');
+
+    expect(mockCreate.mock.calls[0][0].tools).toBeUndefined();
+  });
+
+  it('routes an ordinary question to the research agent (web_search/knowledge_base tools offered)', async () => {
+    mockCreate.mockResolvedValue({ choices: [{ message: { content: 'Some answer.' } }] });
+    const configService = createConfigService({ OPENAI_API_KEY: 'test-key' });
+    const service = new ChatService(configService, createFakePrisma(), createFakeMetrics());
+
+    await service.createReply(CLIENT_ID, "What is our company's leave policy?");
+
+    const toolNames = (mockCreate.mock.calls[0][0].tools as { function: { name: string } }[]).map(
+      (tool) => tool.function.name,
+    );
+    expect(toolNames.sort()).toEqual(['search_knowledge_base', 'web_search']);
   });
 
   it('throws BadGatewayException when the OpenAI request fails', async () => {
