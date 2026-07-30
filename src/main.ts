@@ -5,7 +5,12 @@ import { AppModule } from './app.module';
 import { AllExceptionsFilter } from './common/all-exceptions.filter';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  // rawBody: true keeps the original request buffer available as
+  // req.rawBody alongside the normal parsed req.body. The billing webhook
+  // needs the untouched bytes to verify Stripe's signature — a
+  // reserialized JSON body would produce a different signature and always
+  // fail verification.
+  const app = await NestFactory.create(AppModule, { rawBody: true });
   app.enableCors();
   app.useGlobalPipes(
     new ValidationPipe({

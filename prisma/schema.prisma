@@ -21,6 +21,29 @@ model Client {
   apiKeys   ApiKey[]
   documents Document[]
   messages  Message[]
+
+  // Billing (Stripe). stripeCustomerId is null until the client's first
+  // checkout completes. plan/subscriptionStatus are updated exclusively by
+  // the billing webhook (Stripe is the source of truth) — never set them
+  // directly from user-facing request handlers.
+  stripeCustomerId   String?            @unique
+  plan               Plan               @default(FREE)
+  subscriptionStatus SubscriptionStatus @default(NONE)
+}
+
+enum Plan {
+  FREE
+  PRO
+  BUSINESS
+}
+
+// Mirrors Stripe subscription lifecycle states relevant to access control.
+// NONE means no subscription was ever started (always the case for FREE).
+enum SubscriptionStatus {
+  NONE
+  ACTIVE
+  PAST_DUE
+  CANCELED
 }
 
 model Message {

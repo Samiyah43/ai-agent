@@ -18,3 +18,17 @@ services:
       # since Render requires a card on file for its own DB, even on the free plan.
       - key: DATABASE_URL
         sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_PRICE_ID_PRO
+        sync: false
+      - key: STRIPE_PRICE_ID_BUSINESS
+        sync: false
+      # From the webhook endpoint you configure in the Stripe Dashboard
+      # pointing at https://<your-render-url>/billing/webhook.
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: BILLING_SUCCESS_URL
+        sync: false
+      - key: BILLING_CANCEL_URL
+        sync: false
