@@ -11,6 +11,8 @@ function createFakeMetrics(): MetricsService {
     chatErrorsTotal: { inc: jest.fn() },
     toolCallsTotal: { inc: jest.fn() },
     agentRequestsTotal: { inc: jest.fn() },
+    taskPlansTotal: { inc: jest.fn() },
+    taskPlanSteps: { observe: jest.fn() },
   } as unknown as MetricsService;
 }
 
@@ -333,6 +335,77 @@ describe('ChatService', () => {
     // The guardrail short-circuits before a second round is ever requested —
     // the model never gets a chance to answer from its own general knowledge.
     expect(mockCreate).toHaveBeenCalledTimes(1);
+  });
+
+  describe('task planning', () => {
+    it('splits a multi-step message into steps, routes each to its own agent, and combines the replies', async () => {
+      mockCreate
+        .mockResolvedValueOnce({
+          choices: [
+            {
+              message: {
+                tool_calls: [
+                  {
+                    type: 'function',
+                    function: {
+                      name: 'submit_plan',
+                      arguments: JSON.stringify({ steps: ['Calculate 2 + 2', 'Tell me a joke'] }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        })
+        .mockResolvedValueOnce({ choices: [{ message: { content: '4' } }] })
+        .mockResolvedValueOnce({ choices: [{ message: { content: 'Why did the chicken cross the road?' } }] });
+
+      const metrics = createFakeMetrics();
+      const configService = createConfigService({ OPENAI_API_KEY: 'test-key' });
+      const service = new ChatService(configService, createFakePrisma(), metrics);
+
+      const result = await service.createReply(CLIENT_ID, 'Calculate 2 + 2, then tell me a joke');
+
+      expect(mockCreate).toHaveBeenCalledTimes(3);
+      expect(result.reply).toBe(
+        '1. Calculate 2 + 2\n4\n\n2. Tell me a joke\nWhy did the chicken cross the road?',
+      );
+      expect(metrics.taskPlansTotal.inc).toHaveBeenCalledTimes(1);
+      expect(metrics.taskPlanSteps.observe).toHaveBeenCalledWith(2);
+      // The math step and the small-talk step should route to different agents.
+      expect(metrics.agentRequestsTotal.inc).toHaveBeenCalledWith({ agent: 'math-data' });
+      expect(metrics.agentRequestsTotal.inc).toHaveBeenCalledWith({ agent: 'general' });
+    });
+
+    it('falls back to the normal single-agent flow when the plan collapses to one step', async () => {
+      mockCreate
+        .mockResolvedValueOnce({
+          choices: [
+            {
+              message: {
+                tool_calls: [
+                  {
+                    type: 'function',
+                    function: {
+                      name: 'submit_plan',
+                      arguments: JSON.stringify({ steps: ['What is 2 + 2?'] }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        })
+        .mockResolvedValueOnce({ choices: [{ message: { content: '4' } }] });
+
+      const configService = createConfigService({ OPENAI_API_KEY: 'test-key' });
+      const service = new ChatService(configService, createFakePrisma(), createFakeMetrics());
+
+      const result = await service.createReply(CLIENT_ID, 'What is 2 + 2? and then nothing else');
+
+      expect(result.reply).toBe('4');
+      expect(mockCreate).toHaveBeenCalledTimes(2);
+    });
   });
 
   describe('streamReply', () => {

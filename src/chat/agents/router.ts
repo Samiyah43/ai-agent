@@ -11,7 +11,7 @@ const MATH_DATA_PATTERN =
   /\b(calculate|compute|sum|total|multiply|multiplied|times|divide|divided|plus|minus|square root|percentage|weather|mausam|temperature|forecast|climate|garmi|sardi)\b/i;
 
 const SMALL_TALK_PATTERN =
-  /^\s*(hi|hello|hey|salam|assalam|asalam|good morning|good evening|good night|kya hal|kaisay ho|kaise ho|how are you|thanks|thank you|shukriya|bye|goodbye)\b|\b(tell me a joke|who are you|what can you do|tell me about yourself)\b/i;
+  /^\s*(hi|hello|hey|salam|assalam|asalam|good morning|good evening|good night|kya hal|kaisay ho|kaise ho|how are you|thanks|thank you|shukriya|bye|goodbye)\b|\b(tell (me )?a joke|joke|who are you|what can you do|tell me about yourself)\b/i;
 
 // Deterministic keyword-based routing, same philosophy as needsWebSearch() in
 // research.agent.ts: small/free models are unreliable at *deciding* which

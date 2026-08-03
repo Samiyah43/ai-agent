@@ -31,6 +31,11 @@ describe('routeToAgent', () => {
     expect(routeToAgent('Who are you?')).toBe(generalAgent);
   });
 
+  it('routes "tell a joke" without "me" to the general agent (task-planner steps often drop pronouns)', () => {
+    expect(routeToAgent('Tell a joke.')).toBe(generalAgent);
+    expect(routeToAgent('Tell me a joke')).toBe(generalAgent);
+  });
+
   it('falls back to the research agent for factual/knowledge/current-info questions', () => {
     expect(routeToAgent("What is our company's leave policy?")).toBe(researchAgent);
     expect(routeToAgent('Compare ChatGPT, Claude and Gemini')).toBe(researchAgent);

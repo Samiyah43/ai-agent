@@ -43,6 +43,19 @@ export class MetricsService {
     registers: [this.registry],
   });
 
+  readonly taskPlansTotal = new Counter({
+    name: 'agent_task_plans_total',
+    help: 'Total /chat requests that were broken down into a multi-step task plan',
+    registers: [this.registry],
+  });
+
+  readonly taskPlanSteps = new Histogram({
+    name: 'agent_task_plan_steps',
+    help: 'Number of steps per executed task plan',
+    buckets: [1, 2, 3, 4, 5],
+    registers: [this.registry],
+  });
+
   constructor() {
     collectDefaultMetrics({ register: this.registry });
   }

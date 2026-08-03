@@ -4,8 +4,10 @@ import { ConfigService } from '@nestjs/config';
 import OpenAI from 'openai';
 import { MetricsService } from '../metrics/metrics.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { AgentDefinition } from './agents/agent.types';
 import { needsWebSearch, researchAgent } from './agents/research.agent';
 import { routeToAgent } from './agents/router';
+import { createPlan, looksMultiStep } from './agents/task-planner';
 import { runCalculator } from './tools/calculator.tool';
 import { KB_EMPTY_ERROR, KB_NO_MATCH_ERROR, runKnowledgeBase } from './tools/knowledge-base.tool';
 import { runWeather } from './tools/weather.tool';
@@ -78,81 +80,38 @@ export class ChatService {
     }
 
     const id = conversationId ?? randomUUID();
-    const history = await this.loadHistory(clientId, id);
-
-    const userMessage: OpenAI.Chat.ChatCompletionMessageParam = { role: 'user', content: message };
-    history.push(userMessage);
-    await this.persist(clientId, id, userMessage);
-
+    const priorHistory = await this.loadHistory(clientId, id);
     const model = this.configService.get<string>('OPENAI_MODEL') ?? 'gpt-5-mini';
 
-    // Router picks a specialist agent per message (not persisted — a
-    // conversation can be answered by a different agent each turn). The
-    // system prompt therefore isn't stored in the DB; it's rebuilt here from
-    // whichever agent handles this turn and prepended just for this call.
-    const agent = routeToAgent(message);
-    this.metrics.agentRequestsTotal.inc({ agent: agent.name });
-    this.logger.log(`[router] "${message.slice(0, 80)}" -> ${agent.name}`);
-    const systemMessage: OpenAI.Chat.ChatCompletionMessageParam = {
-      role: 'system',
-      content: agent.systemPrompt,
-    };
+    const userMessage: OpenAI.Chat.ChatCompletionMessageParam = { role: 'user', content: message };
+    await this.persist(clientId, id, userMessage);
 
     try {
-      let reply: string | undefined;
-
-      // A single user message can need more than one tool (e.g. "news and weather"),
-      // and a model can decide to call another tool after seeing the first tool's
-      // result. Tools must stay available on every round, or the model can attempt
-      // a call the API then rejects. MAX_TOOL_ROUNDS is a safety cap against a model
-      // that keeps calling tools forever.
-      const MAX_TOOL_ROUNDS = 5;
-      const forceWebSearch = agent === researchAgent && needsWebSearch(message);
-
-      for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-        const response = await this.client.chat.completions.create({
-          model,
-          messages: [systemMessage, ...history],
-          ...(agent.tools.length ? { tools: agent.tools } : {}),
-          ...(round === 0 && forceWebSearch
-            ? { tool_choice: { type: 'function' as const, function: { name: 'web_search' } } }
-            : {}),
-        });
-
-        const responseMessage = response.choices[0]?.message;
-        const toolCalls = responseMessage?.tool_calls;
-
-        if (!toolCalls?.length) {
-          reply = responseMessage?.content || 'Sorry, I could not generate a reply. Please try again.';
-          break;
-        }
-
-        history.push(responseMessage);
-        await this.persist(clientId, id, responseMessage);
-
-        const results: string[] = [];
-        for (const toolCall of toolCalls) {
-          const result = await this.runTool(toolCall, clientId);
-          results.push(result);
-          const toolMessage: OpenAI.Chat.ChatCompletionMessageParam = {
-            role: 'tool',
-            tool_call_id: toolCall.id,
-            content: result,
-          };
-          history.push(toolMessage);
-          await this.persist(clientId, id, toolMessage);
-        }
-
-        if (isUngroundedKnowledgeBaseLookup(toolCalls, results)) {
-          reply = KB_HONEST_FALLBACK_REPLY;
-          break;
+      // Cheap regex pre-filter first (see looksMultiStep) — only messages that
+      // actually look like they contain more than one request pay for the
+      // extra planning LLM call below.
+      if (looksMultiStep(message)) {
+        const steps = await createPlan(this.client, model, message);
+        if (steps.length > 1) {
+          // The raw compound message is deliberately left out of the history
+          // each step's LLM call sees — otherwise the model notices the other
+          // half of the request sitting right there and answers it too,
+          // defeating the point of splitting the work into isolated steps.
+          const planHistory = [...priorHistory];
+          return { reply: await this.runPlan(clientId, id, model, planHistory, steps), conversationId: id };
         }
       }
 
-      reply ??= 'Sorry, I could not generate a reply after multiple tool calls. Please try again.';
+      // Router picks a specialist agent per message (not persisted — a
+      // conversation can be answered by a different agent each turn). The
+      // system prompt therefore isn't stored in the DB; it's rebuilt here from
+      // whichever agent handles this turn and prepended just for this call.
+      const history = [...priorHistory, userMessage];
+      const agent = routeToAgent(message);
+      this.metrics.agentRequestsTotal.inc({ agent: agent.name });
+      this.logger.log(`[router] "${message.slice(0, 80)}" -> ${agent.name}`);
 
-      await this.persist(clientId, id, { role: 'assistant', content: reply });
-
+      const reply = await this.runAgentTurn(clientId, id, agent, model, history);
       return { reply, conversationId: id };
     } catch (error) {
       this.metrics.chatErrorsTotal.inc();
@@ -161,6 +120,126 @@ export class ChatService {
         'The AI service could not respond right now. Please try again in a moment.',
       );
     }
+  }
+
+  // Runs a message's request end-to-end through one specialist agent's
+  // tool-calling loop and persists the final reply. Shared by the
+  // single-agent path in createReply() and by each step of runPlan() below —
+  // extracted so a multi-step plan can reuse the exact same round-loop
+  // (including the no-hallucination guardrail) per step instead of
+  // duplicating it.
+  private async runAgentTurn(
+    clientId: number,
+    id: string,
+    agent: AgentDefinition,
+    model: string,
+    history: OpenAI.Chat.ChatCompletionMessageParam[],
+  ): Promise<string> {
+    if (!this.client) {
+      throw new ServiceUnavailableException('OpenAI client is not configured.');
+    }
+    const client = this.client;
+
+    const systemMessage: OpenAI.Chat.ChatCompletionMessageParam = {
+      role: 'system',
+      content: agent.systemPrompt,
+    };
+
+    let reply: string | undefined;
+
+    // A single user message can need more than one tool (e.g. "news and weather"),
+    // and a model can decide to call another tool after seeing the first tool's
+    // result. Tools must stay available on every round, or the model can attempt
+    // a call the API then rejects. MAX_TOOL_ROUNDS is a safety cap against a model
+    // that keeps calling tools forever.
+    const MAX_TOOL_ROUNDS = 5;
+    const lastUserMessage = [...history].reverse().find((m) => m.role === 'user');
+    const forceWebSearch =
+      agent === researchAgent &&
+      typeof lastUserMessage?.content === 'string' &&
+      needsWebSearch(lastUserMessage.content);
+
+    for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+      const response = await client.chat.completions.create({
+        model,
+        messages: [systemMessage, ...history],
+        ...(agent.tools.length ? { tools: agent.tools } : {}),
+        ...(round === 0 && forceWebSearch
+          ? { tool_choice: { type: 'function' as const, function: { name: 'web_search' } } }
+          : {}),
+      });
+
+      const responseMessage = response.choices[0]?.message;
+      const toolCalls = responseMessage?.tool_calls;
+
+      if (!toolCalls?.length) {
+        reply = responseMessage?.content || 'Sorry, I could not generate a reply. Please try again.';
+        break;
+      }
+
+      history.push(responseMessage);
+      await this.persist(clientId, id, responseMessage);
+
+      const results: string[] = [];
+      for (const toolCall of toolCalls) {
+        const result = await this.runTool(toolCall, clientId);
+        results.push(result);
+        const toolMessage: OpenAI.Chat.ChatCompletionMessageParam = {
+          role: 'tool',
+          tool_call_id: toolCall.id,
+          content: result,
+        };
+        history.push(toolMessage);
+        await this.persist(clientId, id, toolMessage);
+      }
+
+      if (isUngroundedKnowledgeBaseLookup(toolCalls, results)) {
+        reply = KB_HONEST_FALLBACK_REPLY;
+        break;
+      }
+    }
+
+    reply ??= 'Sorry, I could not generate a reply after multiple tool calls. Please try again.';
+    await this.persist(clientId, id, { role: 'assistant', content: reply });
+    return reply;
+  }
+
+  // Executes a multi-step plan sequentially: each step is routed to its own
+  // specialist agent and run through the normal tool-calling loop, in order,
+  // so a later step can see earlier steps' replies in `history`. Each step's
+  // synthetic prompt is persisted with a "[Task Planner ...]" prefix so the
+  // conversation log stays honest about what the user actually typed versus
+  // what the planner derived from it.
+  private async runPlan(
+    clientId: number,
+    id: string,
+    model: string,
+    history: OpenAI.Chat.ChatCompletionMessageParam[],
+    steps: string[],
+  ): Promise<string> {
+    this.metrics.taskPlansTotal.inc();
+    this.metrics.taskPlanSteps.observe(steps.length);
+    this.logger.log(`[planner] split into ${steps.length} steps: ${JSON.stringify(steps)}`);
+
+    const stepReplies: { step: string; agent: string; reply: string }[] = [];
+
+    for (const [index, step] of steps.entries()) {
+      const stepMessage: OpenAI.Chat.ChatCompletionMessageParam = {
+        role: 'user',
+        content: `[Task Planner — step ${index + 1}/${steps.length}] ${step}`,
+      };
+      history.push(stepMessage);
+      await this.persist(clientId, id, stepMessage);
+
+      const agent = routeToAgent(step);
+      this.metrics.agentRequestsTotal.inc({ agent: agent.name });
+      this.logger.log(`[planner step ${index + 1}] "${step.slice(0, 80)}" -> ${agent.name}`);
+
+      const reply = await this.runAgentTurn(clientId, id, agent, model, history);
+      stepReplies.push({ step, agent: agent.name, reply });
+    }
+
+    return stepReplies.map((r, i) => `${i + 1}. ${r.step}\n${r.reply}`).join('\n\n');
   }
 
   // Same agent/tool-calling flow as createReply(), but yields events as the
