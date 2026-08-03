@@ -22,6 +22,18 @@ export interface ChatReply {
   conversationId: string;
 }
 
+// Events yielded by streamReply(), one per SSE message. 'delta' carries a
+// fragment of the reply as it's generated; 'tool_call'/'tool_result' let the
+// client show "using web_search..." while a tool runs; 'done'/'error' end
+// the stream.
+export type ChatStreamEvent =
+  | { type: 'start'; conversationId: string }
+  | { type: 'delta'; content: string }
+  | { type: 'tool_call'; name: string }
+  | { type: 'tool_result'; name: string }
+  | { type: 'done'; conversationId: string }
+  | { type: 'error'; message: string };
+
 @Injectable()
 export class ChatService {
   private readonly client: OpenAI | null;
@@ -119,6 +131,126 @@ export class ChatService {
       throw new BadGatewayException(
         'The AI service could not respond right now. Please try again in a moment.',
       );
+    }
+  }
+
+  // Same agent/tool-calling flow as createReply(), but yields events as the
+  // model generates them instead of returning one finished string. An async
+  // generator (function*) lets the controller do `for await (const event of
+  // ...)` and forward each one to the client as it arrives, rather than
+  // waiting for the whole reply to be ready.
+  async *streamReply(
+    clientId: number,
+    message: string,
+    conversationId?: string,
+  ): AsyncGenerator<ChatStreamEvent> {
+    if (!this.client) {
+      yield {
+        type: 'error',
+        message: 'OpenAI is not configured. Add OPENAI_API_KEY to your .env file and restart the server.',
+      };
+      return;
+    }
+
+    const id = conversationId ?? randomUUID();
+    yield { type: 'start', conversationId: id };
+
+    const history = await this.loadHistory(clientId, id);
+    const userMessage: OpenAI.Chat.ChatCompletionMessageParam = { role: 'user', content: message };
+    history.push(userMessage);
+    await this.persist(clientId, id, userMessage);
+
+    const model = this.configService.get<string>('OPENAI_MODEL') ?? 'gpt-5-mini';
+    const agent = routeToAgent(message);
+    this.metrics.agentRequestsTotal.inc({ agent: agent.name });
+    this.logger.log(`[router] "${message.slice(0, 80)}" -> ${agent.name}`);
+    const systemMessage: OpenAI.Chat.ChatCompletionMessageParam = {
+      role: 'system',
+      content: agent.systemPrompt,
+    };
+
+    try {
+      const MAX_TOOL_ROUNDS = 5;
+      const forceWebSearch = agent === researchAgent && needsWebSearch(message);
+      let finalReply: string | undefined;
+
+      for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+        const stream = await this.client.chat.completions.create({
+          model,
+          messages: [systemMessage, ...history],
+          ...(agent.tools.length ? { tools: agent.tools } : {}),
+          ...(round === 0 && forceWebSearch
+            ? { tool_choice: { type: 'function' as const, function: { name: 'web_search' } } }
+            : {}),
+          stream: true,
+        });
+
+        // The API sends the reply in small pieces ("chunks"). Plain text
+        // arrives as delta.content fragments, which we forward immediately.
+        // A tool call arrives split up too — its id/name come in the first
+        // chunk that mentions it, and its arguments string is built up
+        // fragment by fragment across later chunks — so we accumulate them
+        // by index until the round ends, then run the tool once complete.
+        let contentBuffer = '';
+        const toolCallsAcc = new Map<number, { id?: string; name?: string; args: string }>();
+
+        for await (const chunk of stream) {
+          const delta = chunk.choices[0]?.delta;
+          if (delta?.content) {
+            contentBuffer += delta.content;
+            yield { type: 'delta', content: delta.content };
+          }
+          for (const toolCallDelta of delta?.tool_calls ?? []) {
+            const acc = toolCallsAcc.get(toolCallDelta.index) ?? { args: '' };
+            if (toolCallDelta.id) acc.id = toolCallDelta.id;
+            if (toolCallDelta.function?.name) acc.name = toolCallDelta.function.name;
+            if (toolCallDelta.function?.arguments) acc.args += toolCallDelta.function.arguments;
+            toolCallsAcc.set(toolCallDelta.index, acc);
+          }
+        }
+
+        if (toolCallsAcc.size === 0) {
+          finalReply = contentBuffer || 'Sorry, I could not generate a reply. Please try again.';
+          break;
+        }
+
+        const toolCalls: OpenAI.Chat.ChatCompletionMessageFunctionToolCall[] = [...toolCallsAcc.values()].map(
+          (acc) => ({
+            id: acc.id ?? '',
+            type: 'function' as const,
+            function: { name: acc.name ?? '', arguments: acc.args },
+          }),
+        );
+
+        const assistantMessage: OpenAI.Chat.ChatCompletionMessageParam = {
+          role: 'assistant',
+          content: contentBuffer || null,
+          tool_calls: toolCalls,
+        };
+        history.push(assistantMessage);
+        await this.persist(clientId, id, assistantMessage);
+
+        for (const toolCall of toolCalls) {
+          yield { type: 'tool_call', name: toolCall.function.name };
+          const result = await this.runTool(toolCall, clientId);
+          yield { type: 'tool_result', name: toolCall.function.name };
+          const toolMessage: OpenAI.Chat.ChatCompletionMessageParam = {
+            role: 'tool',
+            tool_call_id: toolCall.id,
+            content: result,
+          };
+          history.push(toolMessage);
+          await this.persist(clientId, id, toolMessage);
+        }
+      }
+
+      finalReply ??= 'Sorry, I could not generate a reply after multiple tool calls. Please try again.';
+      await this.persist(clientId, id, { role: 'assistant', content: finalReply });
+      yield { type: 'done', conversationId: id };
+    } catch (error) {
+      this.metrics.chatErrorsTotal.inc();
+      this.logger.error('OpenAI streaming request failed', error instanceof Error ? error.stack : error);
+      yield { type: 'error', message: 'The AI service could not respond right now. Please try again in a moment.' };
     }
   }
 
