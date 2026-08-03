@@ -100,6 +100,7 @@ export class ChatService {
           const planHistory = [...priorHistory];
           return { reply: await this.runPlan(clientId, id, model, planHistory, steps), conversationId: id };
         }
+        this.logger.log(`[planner] "${message.slice(0, 80)}" looked multi-step but collapsed to 1 step, falling back to normal routing`);
       }
 
       // Router picks a specialist agent per message (not persisted — a
