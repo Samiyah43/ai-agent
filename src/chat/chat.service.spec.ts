@@ -2,7 +2,7 @@ import { BadGatewayException, Logger, ServiceUnavailableException } from '@nestj
 import { ConfigService } from '@nestjs/config';
 import { MetricsService } from '../metrics/metrics.service';
 import { PrismaService } from '../prisma/prisma.service';
-import { ChatService } from './chat.service';
+import { ChatService, KB_HONEST_FALLBACK_REPLY } from './chat.service';
 
 // ChatService only calls .inc() on these two counters — a minimal stand-in
 // is enough, matching the style of createFakePrisma() below.
@@ -91,6 +91,11 @@ function createFakePrisma(): PrismaService {
           .filter((row) => row.clientId === where.clientId && row.conversationId === where.conversationId)
           .sort((a, b) => a.id - b.id),
       ),
+    },
+    // No chunks ever ingested — enough to make runKnowledgeBase() return
+    // KB_EMPTY_ERROR without needing a real embedding model in these tests.
+    chunk: {
+      findMany: jest.fn(async () => []),
     },
   } as unknown as PrismaService;
 }
@@ -301,6 +306,35 @@ describe('ChatService', () => {
     await expect(service.createReply(CLIENT_ID,'Hi')).rejects.toBeInstanceOf(BadGatewayException);
   });
 
+  it('forces an honest fallback reply when the knowledge base finds nothing (no-hallucination guardrail)', async () => {
+    mockCreate.mockResolvedValueOnce({
+      choices: [
+        {
+          message: {
+            content: null,
+            tool_calls: [
+              {
+                id: 'call_1',
+                type: 'function',
+                function: { name: 'search_knowledge_base', arguments: '{"query":"refund policy"}' },
+              },
+            ],
+          },
+        },
+      ],
+    });
+
+    const configService = createConfigService({ OPENAI_API_KEY: 'test-key' });
+    const service = new ChatService(configService, createFakePrisma(), createFakeMetrics());
+
+    const result = await service.createReply(CLIENT_ID, "What's our refund policy?");
+
+    expect(result.reply).toBe(KB_HONEST_FALLBACK_REPLY);
+    // The guardrail short-circuits before a second round is ever requested —
+    // the model never gets a chance to answer from its own general knowledge.
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+  });
+
   describe('streamReply', () => {
     it('yields an error event when no API key exists', async () => {
       const configService = createConfigService({});
@@ -359,6 +393,28 @@ describe('ChatService', () => {
           ]),
         }),
       );
+    });
+
+    it('forces an honest fallback reply when the knowledge base finds nothing (no-hallucination guardrail)', async () => {
+      mockCreate.mockResolvedValueOnce(
+        fakeStream([{ toolCalls: [{ index: 0, id: 'call_1', name: 'search_knowledge_base', args: '{"query":"refund policy"}' }] }]),
+      );
+
+      const configService = createConfigService({ OPENAI_API_KEY: 'test-key' });
+      const service = new ChatService(configService, createFakePrisma(), createFakeMetrics());
+
+      const events = await collect(service.streamReply(CLIENT_ID, "What's our refund policy?"));
+
+      expect(events).toEqual(
+        expect.arrayContaining([
+          { type: 'tool_call', name: 'search_knowledge_base' },
+          { type: 'tool_result', name: 'search_knowledge_base' },
+          { type: 'delta', content: KB_HONEST_FALLBACK_REPLY },
+        ]),
+      );
+      expect(events.at(-1)).toEqual({ type: 'done', conversationId: expect.any(String) });
+      // The guardrail short-circuits before a second round is ever requested.
+      expect(mockCreate).toHaveBeenCalledTimes(1);
     });
 
     it('yields an error event when the OpenAI request fails', async () => {

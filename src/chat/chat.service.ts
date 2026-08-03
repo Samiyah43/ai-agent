@@ -7,7 +7,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { needsWebSearch, researchAgent } from './agents/research.agent';
 import { routeToAgent } from './agents/router';
 import { runCalculator } from './tools/calculator.tool';
-import { runKnowledgeBase } from './tools/knowledge-base.tool';
+import { KB_EMPTY_ERROR, KB_NO_MATCH_ERROR, runKnowledgeBase } from './tools/knowledge-base.tool';
 import { runWeather } from './tools/weather.tool';
 import { runWebSearch } from './tools/web-search.tool';
 
@@ -16,6 +16,27 @@ import { runWebSearch } from './tools/web-search.tool';
 // separately at request time (see createReply), based on whichever agent the
 // router picks for the current message, so it isn't counted here.
 const MAX_HISTORY_MESSAGES = 20;
+
+// No-hallucination guardrail: if search_knowledge_base was the only tool
+// called this round and it found nothing, the reply is forced to this fixed
+// message instead of letting the model generate its own — a system-prompt
+// instruction ("don't guess") is only a request the model can ignore, this
+// is a hard guarantee that never reaches the model's own general knowledge.
+export const KB_HONEST_FALLBACK_REPLY =
+  "I couldn't find anything about that in the knowledge base, so I don't want to guess. Please reach out to our support team directly for help with this one.";
+
+function isUngroundedKnowledgeBaseLookup(
+  toolCalls: OpenAI.Chat.ChatCompletionMessageToolCall[],
+  results: string[],
+): boolean {
+  const [only] = toolCalls;
+  return (
+    toolCalls.length === 1 &&
+    only.type === 'function' &&
+    only.function.name === 'search_knowledge_base' &&
+    (results[0] === KB_EMPTY_ERROR || results[0] === KB_NO_MATCH_ERROR)
+  );
+}
 
 export interface ChatReply {
   reply: string;
@@ -109,14 +130,22 @@ export class ChatService {
         history.push(responseMessage);
         await this.persist(clientId, id, responseMessage);
 
+        const results: string[] = [];
         for (const toolCall of toolCalls) {
+          const result = await this.runTool(toolCall, clientId);
+          results.push(result);
           const toolMessage: OpenAI.Chat.ChatCompletionMessageParam = {
             role: 'tool',
             tool_call_id: toolCall.id,
-            content: await this.runTool(toolCall, clientId),
+            content: result,
           };
           history.push(toolMessage);
           await this.persist(clientId, id, toolMessage);
+        }
+
+        if (isUngroundedKnowledgeBaseLookup(toolCalls, results)) {
+          reply = KB_HONEST_FALLBACK_REPLY;
+          break;
         }
       }
 
@@ -230,9 +259,11 @@ export class ChatService {
         history.push(assistantMessage);
         await this.persist(clientId, id, assistantMessage);
 
+        const results: string[] = [];
         for (const toolCall of toolCalls) {
           yield { type: 'tool_call', name: toolCall.function.name };
           const result = await this.runTool(toolCall, clientId);
+          results.push(result);
           yield { type: 'tool_result', name: toolCall.function.name };
           const toolMessage: OpenAI.Chat.ChatCompletionMessageParam = {
             role: 'tool',
@@ -241,6 +272,12 @@ export class ChatService {
           };
           history.push(toolMessage);
           await this.persist(clientId, id, toolMessage);
+        }
+
+        if (isUngroundedKnowledgeBaseLookup(toolCalls, results)) {
+          yield { type: 'delta', content: KB_HONEST_FALLBACK_REPLY };
+          finalReply = KB_HONEST_FALLBACK_REPLY;
+          break;
         }
       }
 

@@ -24,6 +24,13 @@ export const knowledgeBaseToolDefinition: OpenAI.Chat.ChatCompletionTool = {
   },
 };
 
+// Exported so ChatService can detect these exact outcomes and force a
+// guaranteed "I don't know" reply instead of letting the model decide
+// whether to follow that instruction — see the no-hallucination guardrail
+// in chat.service.ts.
+export const KB_EMPTY_ERROR = 'Error: the knowledge base is empty. No documents have been ingested yet.';
+export const KB_NO_MATCH_ERROR = 'Error: no relevant information was found in the knowledge base for that query.';
+
 const TOP_MATCHES = 3;
 // Cosine similarity ranges from -1 to 1; below this, a match is probably
 // unrelated noise rather than a genuine answer. Kept fairly low because the
@@ -54,7 +61,7 @@ export async function runKnowledgeBase(query: string, clientId: number, prisma: 
       include: { document: true },
     });
     if (!chunks.length) {
-      return 'Error: the knowledge base is empty. No documents have been ingested yet.';
+      return KB_EMPTY_ERROR;
     }
 
     const queryEmbedding = await embedText(query);
@@ -64,7 +71,7 @@ export async function runKnowledgeBase(query: string, clientId: number, prisma: 
       .slice(0, TOP_MATCHES);
 
     if (!ranked.length || ranked[0].score < MIN_RELEVANCE_SCORE) {
-      return 'Error: no relevant information was found in the knowledge base for that query.';
+      return KB_NO_MATCH_ERROR;
     }
 
     return ranked
